@@ -2,28 +2,26 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
 type broadcast struct {
-	ids    []int64
 	idLock sync.Mutex
-
-	topologies     map[string][]string
-	topoligiesLock sync.Mutex
+	idMap  map[int64]struct{}
 }
 
 func newBroadcast() broadcast {
 	return broadcast{
-		ids:        make([]int64, 0),
-		topologies: make(map[string][]string),
+		idMap: make(map[int64]struct{}),
 	}
 }
 
 type broadcastMessage struct {
-	Message int64 `json:"message"`
+	Message   int64 `json:"message"`
+	Propagate bool  `json:"propagate"`
 }
 
 func (s *server) broadcast(msg maelstrom.Message) error {
@@ -33,19 +31,45 @@ func (s *server) broadcast(msg maelstrom.Message) error {
 	}
 
 	s.bc.idLock.Lock()
+	s.bc.idMap[body.Message] = struct{}{}
 	defer s.bc.idLock.Unlock()
 
-	s.bc.ids = append(s.bc.ids, body.Message)
+	if body.Propagate {
+		return nil
+	}
+
+	go s.propagateValueToOtherNodes(body.Message)
 
 	return s.node.Reply(msg, map[string]any{
 		"type": "broadcast_ok",
 	})
 }
 
+func (s *server) propagateValueToOtherNodes(id int64) {
+	for _, node := range s.node.NodeIDs() {
+		if node == s.node.ID() {
+			continue
+		}
+
+		err := s.node.Send(node, map[string]any{
+			"type":      "broadcast",
+			"propagate": true,
+			"message":   id,
+		})
+
+		if err != nil {
+			fmt.Printf("failed to propagate to node %s: %s", node, err)
+		}
+	}
+}
+
 func (s *server) read(msg maelstrom.Message) error {
-	var ids []int64
+	ids := make([]int64, 0, len(s.bc.idMap))
+
 	s.bc.idLock.Lock()
-	ids = s.bc.ids
+	for id := range s.bc.idMap {
+		ids = append(ids, id)
+	}
 	s.bc.idLock.Unlock()
 
 	return s.node.Reply(msg, map[string]any{
@@ -54,20 +78,7 @@ func (s *server) read(msg maelstrom.Message) error {
 	})
 }
 
-type topologyMessage struct {
-	topologies map[string][]string `json:"topology"`
-}
-
 func (s *server) topology(msg maelstrom.Message) error {
-	var body topologyMessage
-	if err := json.Unmarshal(msg.Body, &body); err != nil {
-		return err
-	}
-
-	s.bc.topoligiesLock.Lock()
-	s.bc.topologies = body.topologies
-	s.bc.topoligiesLock.Unlock()
-
 	return s.node.Reply(msg, map[string]any{
 		"type": "topology_ok",
 	})
