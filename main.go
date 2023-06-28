@@ -15,10 +15,9 @@ type server struct {
 func main() {
 	n := maelstrom.NewNode()
 
-	server := server{
-		node: n,
-		bc:   newBroadcast(),
-	}
+	broadcaster := newBroadcast()
+
+	server := newServer(n, broadcaster)
 
 	n.Handle("echo", server.echo)
 	n.Handle("generate", server.generate)

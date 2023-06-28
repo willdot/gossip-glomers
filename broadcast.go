@@ -2,8 +2,8 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -20,8 +20,16 @@ func newBroadcast() broadcast {
 }
 
 type broadcastMessage struct {
-	Message   int64 `json:"message"`
-	Propagate bool  `json:"propagate"`
+	Message int64 `json:"message"`
+}
+
+func newServer(node *maelstrom.Node, bc broadcast) server {
+	s := server{
+		node: node,
+		bc:   bc,
+	}
+
+	return s
 }
 
 func (s *server) broadcast(msg maelstrom.Message) error {
@@ -30,35 +38,62 @@ func (s *server) broadcast(msg maelstrom.Message) error {
 		return err
 	}
 
-	s.bc.idLock.Lock()
-	s.bc.idMap[body.Message] = struct{}{}
-	defer s.bc.idLock.Unlock()
+	s.node.Reply(msg, map[string]any{
+		"type": "broadcast_ok",
+	})
 
-	if body.Propagate {
+	if ok := s.checkIfIDExists(body.Message); ok {
 		return nil
 	}
 
-	go s.propagateValueToOtherNodes(body.Message)
+	s.addID(body.Message)
 
-	return s.node.Reply(msg, map[string]any{
-		"type": "broadcast_ok",
-	})
+	s.propagateValueToOtherNodes(msg.Src, body.Message)
+
+	return nil
 }
 
-func (s *server) propagateValueToOtherNodes(id int64) {
-	for _, node := range s.node.NodeIDs() {
-		if node == s.node.ID() {
+func (s *server) addID(id int64) {
+	s.bc.idLock.Lock()
+	defer s.bc.idLock.Unlock()
+
+	s.bc.idMap[id] = struct{}{}
+}
+
+func (s *server) checkIfIDExists(id int64) bool {
+	s.bc.idLock.Lock()
+	defer s.bc.idLock.Unlock()
+
+	_, ok := s.bc.idMap[id]
+
+	return ok
+}
+
+func (s *server) propagateValueToOtherNodes(src string, id int64) {
+	for _, n := range s.node.NodeIDs() {
+		node := n
+		if node == src || node == s.node.ID() {
 			continue
 		}
 
-		err := s.node.Send(node, map[string]any{
-			"type":      "broadcast",
-			"propagate": true,
-			"message":   id,
-		})
+		ackd := make(chan struct{})
+		for {
+			select {
+			case <-ackd:
+				break
+			default:
+				body := map[string]any{
+					"type":    "broadcast",
+					"message": id,
+				}
 
-		if err != nil {
-			fmt.Printf("failed to propagate to node %s: %s", node, err)
+				s.node.RPC(node, body, func(msg maelstrom.Message) error {
+					ackd <- struct{}{}
+					return nil
+				})
+
+				time.Sleep(500 * time.Millisecond)
+			}
 		}
 	}
 }
